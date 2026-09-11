@@ -205,19 +205,19 @@ class AppDelegate: FlutterAppDelegate {
     let apps = NSWorkspace.shared.runningApplications.filter {
       $0.activationPolicy == .regular && $0.processIdentifier != myPid
     }
-    // 先在后台恢复各应用最小化的窗口(AX 调用较慢)
+    // 先在后台恢复各应用最小化的窗口(AX 调用较慢),并统计恢复数量
     DispatchQueue.global(qos: .userInitiated).async {
+      var restored = 0
       for app in apps {
-        self.unminimizeWindows(pid: app.processIdentifier)
+        if self.unminimizeWindows(pid: Int(app.processIdentifier)) {
+          restored += 1
+        }
       }
       // unhide 需在主线程调用
       DispatchQueue.main.async {
-        var restored = 0
-        for app in apps {
-          if app.isHidden {
-            app.unhide()
-            restored += 1
-          }
+        for app in apps where app.isHidden {
+          app.unhide()
+          restored += 1
         }
         result(restored)
       }

@@ -649,10 +649,16 @@ class _HomePageState extends State<HomePage> {
     // 最小化窗口依赖辅助功能权限,未授权时先弹一次指引
     await _ensureAxGuide();
     try {
-      await MacChannel.minimizeAllApps();
+      final n = await MacChannel.minimizeAllApps();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已最小化所有应用窗口')),
+          SnackBar(
+            content: Text(
+              n > 0
+                  ? '已最小化 $n 个窗口'
+                  : '没有最小化任何窗口,请确认已在系统设置中开启辅助功能权限',
+            ),
+          ),
         );
       }
     } catch (e) {
@@ -664,10 +670,16 @@ class _HomePageState extends State<HomePage> {
   Future<void> _restoreAllApps() async {
     await _ensureAxGuide();
     try {
-      await MacChannel.restoreAllApps();
+      final n = await MacChannel.restoreAllApps();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已恢复所有应用窗口')),
+          SnackBar(
+            content: Text(
+              n > 0
+                  ? '已恢复 $n 个应用/窗口'
+                  : '没有恢复任何内容(可能无需恢复,或未开启辅助功能权限)',
+            ),
+          ),
         );
       }
     } catch (e) {
@@ -908,12 +920,14 @@ class MacChannel {
       _ch.invokeMethod('openAxSettings');
 
   /// 最小化所有运行中应用的全部窗口(需要辅助功能权限)
-  static Future<void> minimizeAllApps() =>
-      _ch.invokeMethod('minimizeAllApps');
+  /// 返回成功最小化的窗口数量,为 0 通常表示缺少辅助功能权限
+  static Future<int> minimizeAllApps() async =>
+      (await _ch.invokeMethod('minimizeAllApps')) as int? ?? 0;
 
   /// 恢复所有应用:取消隐藏并恢复最小化的窗口(需要辅助功能权限)
-  static Future<void> restoreAllApps() =>
-      _ch.invokeMethod('restoreAllApps');
+  /// 返回恢复的数量,为 0 通常表示缺少辅助功能权限或无需恢复
+  static Future<int> restoreAllApps() async =>
+      (await _ch.invokeMethod('restoreAllApps')) as int? ?? 0;
 }
 
 /// 应用图标:有真实图标显示图标,否则用首字符占位
