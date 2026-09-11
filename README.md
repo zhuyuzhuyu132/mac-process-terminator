@@ -61,3 +61,8 @@ flutter build macos --release
 - **自动化权限**:首次执行退出操作时,macOS 可能要求授予"控制其他应用"权限,同意即可。
 - 系统进程(如 Finder、Dock)policy 为非 regular,默认不出现在列表中。
 - 若目标应用在到点前已被手动关闭,优雅退出/强杀会返回失败提示,可忽略或移除该定时。
+
+
+git add .
+git commit -m "描述这次改了什么"
+git push
