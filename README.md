@@ -23,26 +23,6 @@
 
 ## 构建步骤（必须在 Mac 上执行）
 
-本工程是「源码注入式」项目：`macos/` 目录只包含需要替换的 `AppDelegate.swift`。
-先由 `flutter create` 生成完整工程，再用本仓库文件覆盖：
-
-```bash
-# 1. 生成 Flutter 工程(注意 --platforms 只含 macos,项目名必须保持 mac_process_terminator)
-flutter create --platforms=macos --project-name mac_process_terminator mac_process_terminator_tmp
-
-# 2. 把本目录的 lib/ 覆盖到生成工程
-cp -R mac-process-terminator/lib mac_process_terminator_tmp/
-
-# 3. 用本仓库的 AppDelegate.swift 覆盖生成的文件
-cp mac-process-terminator/macos/Runner/AppDelegate.swift mac_process_terminator_tmp/macos/Runner/AppDelegate.swift
-
-# 4. 关闭沙盒(访问其他应用进程必需)
-#    编辑 mac_process_terminator_tmp/macos/Runner/DebugProfile.entitlements 和 Release.entitlements,
-#    将 com.apple.security.app-sandbox 的值改为 false,或直接删除该键值对:
-#    <key>com.apple.security.app-sandbox</key>
-#    <false/>
-
-# 5. 运行
 cd mac_process_terminator_tmp
 flutter run -d macos
 ```
