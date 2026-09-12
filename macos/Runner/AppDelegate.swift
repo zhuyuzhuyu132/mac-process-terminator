@@ -172,26 +172,7 @@ class AppDelegate: FlutterAppDelegate {
     // 进程存在但没有 bundle(如 Wine 容器内进程)时,app 为 nil,直接走下面的信号回退
 
     if force {
-      // 优先用 NSRunningApplication,失败时回退到 POSIX SIGKILL
-      // (Wine/CrossOver 等容器内的进程 forceTerminate 可能失败)
-      var ok = NSRunningApplication(processIdentifier: pid_t(pid))?.forceTerminate() ?? false
-      if !ok {
-        ok = kill(pid_t(pid), SIGKILL) == 0 || errno == ESRCH
-      }
-      // 关键补充:杀掉整棵进程树。
-      // CrossOver 中运行的 exe 是 Wine 主进程的子进程,只杀单个 PID
-      // (尤其是 CrossOver 主程序)会留下孤儿 exe 继续运行,
-      // 表现为"强制结束看似成功但 exe 还在",这也是部分机器杀不掉的根因
-      if ok {
-        let tree = processTreePIDs(root: pid_t(pid))
-        for p in tree where p != pid_t(pid) {
-          kill(p, SIGKILL) // 子进程尽力杀,失败不影响结果
-        }
-      }
-      ok ? result(true) : result(FlutterError(
-        code: "FORCE_QUIT_FAILED",
-        message: "强制结束 PID \(pid) 失败(错误码 \(errno)),可能权限不足",
-        details: nil))
+      forceKill(pid: pid_t(pid), result: result)
     } else {
       // 优雅退出:先发正常退出请求,失败时回退到 POSIX SIGTERM
       var delivered = NSRunningApplication(processIdentifier: pid_t(pid))?.terminate() ?? false
@@ -218,6 +199,146 @@ class AppDelegate: FlutterAppDelegate {
           result(true)
         }
       }
+    }
+  }
+
+  /// 强制结束目标进程及其整棵进程树。
+  /// 针对 Wine/CrossOver 场景做了两层兜底:
+  /// 1. exe 可能不在所选 PID 的后代里(挂在守护进程/看门狗下)→ 按可执行文件路径补杀;
+  /// 2. 部分游戏启动器有看门狗,主进程死后会自动重新拉起 exe → 轮询观察,发现同名进程复活就继续杀。
+  private func forceKill(pid: pid_t, result: @escaping FlutterResult) {
+    // 先记录可执行文件路径,进程死后仍可按路径识别"复活"的新进程
+    let execPath = processExecutablePath(pid)
+    // 快照:动手前已存在的全部同路径进程(含用户手动开启的多个实例)。
+    // 补杀阶段只处理快照之外"新出现"的进程(看门狗重启的),
+    // 避免把独立运行的其他同名实例一起误杀
+    let preExisting = execPath.map { sameExecutablePIDs(path: $0) } ?? []
+    killTree(root: pid)
+    verifyKilled(pid: pid, execPath: execPath, preExisting: preExisting, attempt: 0, result: result)
+  }
+
+  /// 自底向上杀掉 root 及其全部后代。
+  /// 逆序遍历保证子进程先于父进程被杀,避免父进程一死,
+  /// 子进程被 wineserver 等守护进程收养后脱离控制。
+  @discardableResult
+  private func killTree(root: pid_t) -> Bool {
+    var killed = false
+    for p in processTreePIDs(root: root).reversed() {
+      if p == root {
+        // root 有 bundle 时优先走 forceTerminate(等效于系统的"强制退出"),
+        // 失败(如 Wine 容器内无 bundle 进程)再回退 POSIX SIGKILL
+        let ok = NSRunningApplication(processIdentifier: p)?.forceTerminate() ?? false
+        if ok || kill(p, SIGKILL) == 0 { killed = true }
+      } else if kill(p, SIGKILL) == 0 {
+        killed = true
+      }
+    }
+    return killed
+  }
+
+  /// 枚举系统中可执行文件路径等于 path 的所有进程 PID(排除本应用自身)
+  private func sameExecutablePIDs(path: String) -> Set<pid_t> {
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+    var size = 0
+    guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return [] }
+    let stride = MemoryLayout<kinfo_proc>.stride
+    var procList = [kinfo_proc](repeating: kinfo_proc(), count: size / stride)
+    var actual = size
+    guard sysctl(&mib, 4, &procList, &actual, nil, 0) == 0 else { return [] }
+    procList.removeLast((size - actual) / stride)
+    var pids = Set<pid_t>()
+    let myPid = ProcessInfo.processInfo.processIdentifier
+    for p in procList {
+      let target = p.kp_proc.p_pid
+      guard target != myPid else { continue }
+      if processExecutablePath(target) == path {
+        pids.insert(target)
+      }
+    }
+    return pids
+  }
+
+  /// 杀掉可执行文件路径相同、且不在 preExisting 快照中的进程(排除本应用自身),
+  /// 返回发出 SIGKILL 的数量。只杀"新出现"的进程:
+  /// 用于补杀看门狗重新拉起的同名 exe,不会误杀原有的其他独立实例。
+  private func killSameExecutable(path: String, excluding preExisting: Set<pid_t>) -> Int {
+    var killed = 0
+    for target in sameExecutablePIDs(path: path) where !preExisting.contains(target) {
+      if kill(target, SIGKILL) == 0 {
+        killed += 1
+      }
+    }
+    return killed
+  }
+
+  /// 判断进程是否为僵尸状态(Zombie):
+  /// 被杀掉的进程若父进程(Wine 容器/启动器很常见)没有回收子进程,
+  /// 会残留在进程表中,kill(pid, 0) 仍返回成功,但它已不可能再运行。
+  private func isZombie(_ pid: pid_t) -> Bool {
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    var info = kinfo_proc()
+    var size = MemoryLayout<kinfo_proc>.stride
+    guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else { return false }
+    return info.kp_proc.p_stat == SZOMB
+  }
+
+  /// 轮询确认目标真的死了(约 3 秒);
+  /// 期间若发现同路径新进程复活(看门狗重启),立即补杀并继续观察。
+  /// preExisting 为动手前的同路径进程快照,其中的进程(其他独立实例)不会被触碰。
+  ///
+  /// 终止结果判定原则:SIGKILL 已成功送达(root 仍存活但 kill 不报错)时,
+  /// 用户态已无更多手段(进程可能处于不可中断等待或被调试器挂起,
+  /// 脱离等待后即会退出),视为强制结束成功,不再误报失败。
+  private func verifyKilled(pid: pid_t, execPath: String?, preExisting: Set<pid_t>, attempt: Int, result: @escaping FlutterResult) {
+    var respawnKilled = 0
+    if let path = execPath, !path.isEmpty {
+      respawnKilled = killSameExecutable(path: path, excluding: preExisting)
+    }
+
+    var rootGone = kill(pid, 0) != 0 || isZombie(pid)
+    if !rootGone {
+      // 仍存活,补一轮 SIGKILL(覆盖前几轮漏掉的残留),同时探测信号是否可送达
+      if kill(pid, SIGKILL) != 0 {
+        let e = errno
+        if e == ESRCH {
+          // 探测间隙进程消失了,按已死处理
+          rootGone = true
+        } else {
+          result(FlutterError(
+            code: "FORCE_QUIT_FAILED",
+            message: e == EPERM
+                ? "权限不足,无法终止该进程(可能由其他用户或以管理员身份启动)"
+                : "进程无法被终止(系统错误码 \(e))",
+            details: nil))
+          return
+        }
+      }
+      // 信号送达成功:不再做额外处理,轮询等待其从进程表消失
+    }
+
+    if attempt >= 9 {
+      if !rootGone {
+        // SIGKILL 始终可送达但进程一直残留(不可中断等待/调试器挂起),
+        // 用户态已无法更进一步,按已强制结束处理
+        result(true)
+      } else {
+        // root 已死,但整个观察期内看门狗一直在重新拉起 exe
+        result(FlutterError(
+          code: "FORCE_QUIT_FAILED",
+          message: "进程被反复重新拉起(可能存在看门狗/守护进程),"
+              + "请尝试退出对应的启动器或容器(如 CrossOver)后再试",
+          details: nil))
+      }
+      return
+    }
+
+    if rootGone && respawnKilled == 0 {
+      // 目标已消失(或变僵尸),本轮也没有复活进程,彻底成功
+      result(true)
+      return
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+      self.verifyKilled(pid: pid, execPath: execPath, preExisting: preExisting, attempt: attempt + 1, result: result)
     }
   }
 
