@@ -105,6 +105,51 @@ class AppDelegate: FlutterAppDelegate {
     result(apps)
   }
 
+  /// 获取指定进程的可执行文件路径(用于诊断与后续按路径匹配)
+  private func processExecutablePath(_ pid: pid_t) -> String? {
+    var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+    guard proc_pidpath(pid, &buffer, UInt32(MAXPATHLEN)) > 0 else { return nil }
+    return String(cString: buffer)
+  }
+
+  /// 通过 sysctl 枚举进程表,返回 root 及其全部后代进程的 PID
+  /// (沿 PPID 递归,覆盖 Wine/CrossOver 这类多层容器子进程)
+  private func processTreePIDs(root: pid_t) -> [pid_t] {
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
+    var size = 0
+    guard sysctl(&mib, 4, nil, &size, nil, 0) == 0, size > 0 else { return [root] }
+
+    // 进程数随时在变,返回值可能比预估大,失败时扩大缓冲区重试
+    let stride = MemoryLayout<kinfo_proc>.stride
+    var procList = [kinfo_proc]()
+    for _ in 0..<3 {
+      procList = [kinfo_proc](repeating: kinfo_proc(), count: size / stride)
+      var actual = size
+      if sysctl(&mib, 4, &procList, &actual, nil, 0) == 0 {
+        procList.removeLast((size - actual) / stride)
+        break
+      }
+      guard errno == ENOMEM else { return [root] }
+      size *= 2
+    }
+
+    // 构建 pid -> ppid 映射,再从 root 沿子链收集后代
+    var parentOf: [Int32: Int32] = [:]
+    for p in procList {
+      parentOf[p.kp_proc.p_pid] = p.kp_eproc.e_ppid
+    }
+    var tree: [pid_t] = [root]
+    var queue: [pid_t] = [root]
+    while !queue.isEmpty {
+      let current = queue.removeFirst()
+      for (pid, ppid) in parentOf where ppid == current && pid != current {
+        tree.append(pid)
+        queue.append(pid)
+      }
+    }
+    return tree
+  }
+
   /// 按指定方式关闭目标应用
   private func terminate(call: FlutterMethodCall, force: Bool, result: @escaping FlutterResult) {
     guard let args = call.arguments as? [String: Any],
@@ -131,7 +176,17 @@ class AppDelegate: FlutterAppDelegate {
       // (Wine/CrossOver 等容器内的进程 forceTerminate 可能失败)
       var ok = NSRunningApplication(processIdentifier: pid_t(pid))?.forceTerminate() ?? false
       if !ok {
-        ok = kill(pid_t(pid), SIGKILL) == 0
+        ok = kill(pid_t(pid), SIGKILL) == 0 || errno == ESRCH
+      }
+      // 关键补充:杀掉整棵进程树。
+      // CrossOver 中运行的 exe 是 Wine 主进程的子进程,只杀单个 PID
+      // (尤其是 CrossOver 主程序)会留下孤儿 exe 继续运行,
+      // 表现为"强制结束看似成功但 exe 还在",这也是部分机器杀不掉的根因
+      if ok {
+        let tree = processTreePIDs(root: pid_t(pid))
+        for p in tree where p != pid_t(pid) {
+          kill(p, SIGKILL) // 子进程尽力杀,失败不影响结果
+        }
       }
       ok ? result(true) : result(FlutterError(
         code: "FORCE_QUIT_FAILED",

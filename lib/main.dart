@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   runApp(const ProcessTerminatorApp());
@@ -58,6 +59,40 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _refreshApps();
+    _loadCountdownPrefs();
+  }
+
+  /// 启动时读取上次使用的倒计时设置(持久化,重启应用仍生效)
+  Future<void> _loadCountdownPrefs() async {
+    try {
+      final sp = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      setState(() {
+        _lastCountdown =
+            sp.getInt('countdown_value') ?? _lastCountdown;
+        final unitIdx = sp.getInt('countdown_unit');
+        if (unitIdx != null &&
+            unitIdx >= 0 &&
+            unitIdx < _CountdownUnit.values.length) {
+          _lastCountdownUnit = _CountdownUnit.values[unitIdx];
+        }
+      });
+    } catch (e) {
+      debugPrint('【到点关】读取倒计时设置失败: $e');
+    }
+  }
+
+  /// 保存倒计时设置,下次打开弹框默认使用
+  Future<void> _saveCountdownPrefs(int value, _CountdownUnit unit) async {
+    _lastCountdown = value;
+    _lastCountdownUnit = unit;
+    try {
+      final sp = await SharedPreferences.getInstance();
+      await sp.setInt('countdown_value', value);
+      await sp.setInt('countdown_unit', unit.index);
+    } catch (e) {
+      debugPrint('【到点关】保存倒计时设置失败: $e');
+    }
   }
 
   Future<void> _refreshApps() async {
@@ -241,9 +276,9 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  /// 上次使用的倒计时设置(应用运行期间记住,默认 30 分钟)
-  static int _lastCountdown = 30;
-  static _CountdownUnit _lastCountdownUnit = _CountdownUnit.minutes;
+  /// 上次使用的倒计时设置(持久化记忆,默认 10 秒)
+  static int _lastCountdown = 10;
+  static _CountdownUnit _lastCountdownUnit = _CountdownUnit.seconds;
 
   Future<Duration?> _pickCountdown() async {
     final ctrl = TextEditingController(text: '$_lastCountdown');
@@ -295,9 +330,8 @@ class _HomePageState extends State<HomePage> {
             onPressed: () {
               final n = int.tryParse(ctrl.text.trim());
               if (n == null || n <= 0) return;
-              // 记住本次选择,下次打开弹框默认使用
-              _lastCountdown = n;
-              _lastCountdownUnit = unit.value;
+              // 记住本次选择,下次打开弹框默认使用(含重启应用后)
+              _saveCountdownPrefs(n, unit.value);
               Navigator.pop(
                 ctx,
                 switch (unit.value) {
