@@ -78,4 +78,7 @@ tccutil reset Accessibility com.example.macProcessTerminator
 git add .
 git commit -m "BUG修复"
 git push
+
+git add . && git commit -m "BUG修复" && git push
+
 ```
