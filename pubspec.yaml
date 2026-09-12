@@ -1,7 +1,7 @@
 name: mac_process_terminator
 description: 到点关 - A macOS app to schedule termination of running applications.
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.1+2
 
 environment:
   sdk: ^3.5.0
