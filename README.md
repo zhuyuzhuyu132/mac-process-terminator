@@ -34,6 +34,17 @@ flutter build macos --release
 # 产物: build/macos/Products/Release/mac_process_terminator.app
 ```
 
+## 分发给其他人使用
+
+本项目采用 **ad-hoc 本地签名**（不依赖 Apple 开发者账号，签名永不过期）。把 `.app` 压缩后发给对方即可，但对方首次打开时会被 macOS Gatekeeper 拦截（「无法验证开发者」），需要在终端执行一次：
+
+```bash
+xattr -cr /Applications/到点关.app
+```
+
+> 路径按实际存放位置调整（拖入 `.app` 到终端可自动填入路径）。此命令会清除应用的隔离标记（quarantine），之后即可正常双击打开。
+> 若希望摆脱手动放行、正常分发，需要付费加入 Apple Developer Program 并进行 Developer ID 签名 + 公证。
+
 ## 使用流程
 
 1. 启动应用，自动加载正在运行的程序（已排除自身）。
